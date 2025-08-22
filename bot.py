@@ -1,21 +1,19 @@
 import logging
 import os
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 from bs4 import BeautifulSoup
 import csv
 import re
 import io
-import asyncio
-from aiohttp import web
 import threading
+from aiohttp import web
+import asyncio
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def parse_kinopoisk_html_content(content: str):
-    """Парсит HTML контент страницы Кинопоиска и извлекает фильмы"""
     soup = BeautifulSoup(content, 'html.parser')
     films = []
     
@@ -47,7 +45,6 @@ def parse_kinopoisk_html_content(content: str):
     return films
 
 def films_to_csv(films):
-    """Конвертирует список фильмов в CSV для Letterboxd"""
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(['Title', 'Year', 'Rating', 'WatchedDate', 'imdbID', 'tmdbID'])
@@ -58,7 +55,7 @@ def films_to_csv(films):
     output.seek(0)
     return output.getvalue().encode('utf-8')
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start(update: Update, context: CallbackContext):
     welcome_text = """🎬 Привет! Добро пожаловать в Kinopoisk to Letterboxd Bot!
 
 Я помогу тебе перенести твои фильмы из Кинопоиска в Letterboxd.
@@ -75,24 +72,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Готов? Отправь мне HTML файл! 🚀"""
     
-    await update.message.reply_text(welcome_text)
+    update.message.reply_text(welcome_text)
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_document(update: Update, context: CallbackContext):
     document = update.message.document
     
     if not document:
-        await update.message.reply_text("❌ Пожалуйста, отправь HTML файл.")
+        update.message.reply_text("❌ Пожалуйста, отправь HTML файл.")
         return
     
     if not document.file_name.lower().endswith(('.html', '.htm')):
-        await update.message.reply_text("❌ Нужен именно HTML файл со страницы Кинопоиска.")
+        update.message.reply_text("❌ Нужен именно HTML файл со страницы Кинопоиска.")
         return
     
-    await update.message.reply_text("⏳ Получаю и обрабатываю файл...")
+    update.message.reply_text("⏳ Получаю и обрабатываю файл...")
     
     try:
-        file = await document.get_file()
-        file_content = await file.download_as_bytearray()
+        file = document.get_file()
+        file_content = file.download_as_bytearray()
         
         content_str = None
         for encoding in ['utf-8', 'windows-1251', 'cp1252']:
@@ -103,13 +100,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
         
         if not content_str:
-            await update.message.reply_text("❌ Не удалось прочитать файл.")
+            update.message.reply_text("❌ Не удалось прочитать файл.")
             return
         
         films = parse_kinopoisk_html_content(content_str)
         
         if not films:
-            await update.message.reply_text("❌ Не удалось найти фильмы в файле.")
+            update.message.reply_text("❌ Не удалось найти фильмы в файле.")
             return
         
         csv_content = films_to_csv(films)
@@ -118,7 +115,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         success_text = f"✅ Успешно обработано {len(films)} фильмов!\n\nПерейди на https://letterboxd.com/import и загрузи этот файл."
         
-        await update.message.reply_document(
+        update.message.reply_document(
             document=csv_file,
             filename='letterboxd_import.csv',
             caption=success_text
@@ -126,15 +123,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Ошибка: {e}")
-        await update.message.reply_text("❌ Ошибка при обработке файла.")
+        update.message.reply_text("❌ Ошибка при обработке файла.")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+def handle_message(update: Update, context: CallbackContext):
+    update.message.reply_text(
         "📁 Отправь мне HTML файл страницы с оценками из Кинопоиска.\n\n"
         "Нужна помощь? Напиши /start"
     )
 
-# Web сервер для Render
 async def health_check(request):
     return web.Response(text="Bot is running!")
 
@@ -150,35 +146,32 @@ async def run_web_server():
     await site.start()
     print(f"Web server started on port {port}")
 
-def main():
+def run_bot():
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     
     if not token:
         print("❌ TELEGRAM_BOT_TOKEN не установлен")
         return
     
-    # Создаем приложение
-    application = Application.builder().token(token).build()
+    updater = Updater(token, use_context=True)
+    dp = updater.dispatcher
     
-    # Добавляем обработчики
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(MessageHandler(Filters.document, handle_document))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     
+    print("🚀 Бот запущен!")
+    updater.start_polling(drop_pending_updates=True)
+    updater.idle()
+
+def main():
     # Запускаем бота в отдельном потоке
-    def run_bot():
-        print("🚀 Бот запущен!")
-        application.run_polling(drop_pending_updates=True)
-    
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
     
     # Запускаем веб-сервер в основном потоке
     asyncio.run(run_web_server())
-    
-    # Ждем завершения потока с ботом
-    bot_thread.join()
 
 if __name__ == '__main__':
     main()

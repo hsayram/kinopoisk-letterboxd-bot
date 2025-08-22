@@ -1,17 +1,17 @@
 import logging
 import os
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from bs4 import BeautifulSoup
 import csv
 import re
 import io
+import asyncio
+from aiohttp import web
+import threading
 
 # Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def parse_kinopoisk_html_content(content: str):
@@ -19,15 +19,12 @@ def parse_kinopoisk_html_content(content: str):
     soup = BeautifulSoup(content, 'html.parser')
     films = []
     
-    # Различные селекторы для разных версий страниц Кинопоиска
     film_items = soup.select('.user-rating-item, .profileFilmsList .item, .film-item, .item')
     
     if not film_items:
-        # Альтернативный поиск по тексту
         text_content = soup.get_text()
         lines = text_content.split('\n')
         for line in lines:
-            # Ищем строки с годом в скобках
             year_match = re.search(r'(.+?)\s*\((\d{4})\)', line.strip())
             if year_match and len(year_match.group(1)) > 3:
                 title = year_match.group(1).strip()
@@ -35,7 +32,6 @@ def parse_kinopoisk_html_content(content: str):
                 films.append({'title': title, 'year': year})
     else:
         for item in film_items:
-            # Ищем название фильма
             title_el = item.select_one('.nameRus, .name, .film-name, .film-title, a')
             year_el = item.select_one('.year')
             
@@ -45,7 +41,7 @@ def parse_kinopoisk_html_content(content: str):
                 year = year_match.group(1) if year_match else (year_el.get_text().strip() if year_el else '')
                 title = re.sub(r'\s*\(\d{4}\)', '', title_full).strip()
                 
-                if title and len(title) > 2:  # Фильтруем слишком короткие названия
+                if title and len(title) > 2:
                     films.append({'title': title, 'year': year})
     
     return films
@@ -63,7 +59,6 @@ def films_to_csv(films):
     return output.getvalue().encode('utf-8')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
     welcome_text = """🎬 Привет! Добро пожаловать в Kinopoisk to Letterboxd Bot!
 
 Я помогу тебе перенести твои фильмы из Кинопоиска в Letterboxd.
@@ -82,54 +77,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(welcome_text)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /help"""
-    help_text = """📖 Подробная инструкция:
-
-Шаг 1: Сохранение HTML со страницы Кинопоиска
-• Перейди по ссылке: https://www.kinopoisk.ru/user/ТВОЙ_ID/votes/
-• Нажми Cmd+S (или через меню "Файл" → "Сохранить страницу как...")
-• Выбери "Веб-страница, полностью" 
-• Сохрани файл
-
-Шаг 2: Отправка файла боту
-• Прикрепи сохраненный .html файл к сообщению
-• Отправь мне
-
-Шаг 3: Импорт в Letterboxd
-• Получи от меня готовый CSV файл
-• Перейди на https://letterboxd.com/import
-• Загрузи полученный CSV файл
-• Letterboxd автоматически сопоставит фильмы
-
-❓ Проблемы?
-Если CSV пустой - проверь, что сохранил именно страницу с оценками, а не главную страницу профиля.
-
-💡 Бот работает с русскими названиями - Letterboxd их понимает!"""
-    
-    await update.message.reply_text(help_text)
-
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик получения документов"""
     document = update.message.document
     
     if not document:
         await update.message.reply_text("❌ Пожалуйста, отправь HTML файл.")
         return
     
-    # Проверяем расширение файла
     if not document.file_name.lower().endswith(('.html', '.htm')):
         await update.message.reply_text("❌ Нужен именно HTML файл со страницы Кинопоиска.")
         return
     
-    await update.message.reply_text("⏳ Получаю и обрабатываю файл, это может занять несколько секунд...")
+    await update.message.reply_text("⏳ Получаю и обрабатываю файл...")
     
     try:
-        # Скачиваем файл
         file = await document.get_file()
         file_content = await file.download_as_bytearray()
         
-        # Декодируем с различными кодировками
         content_str = None
         for encoding in ['utf-8', 'windows-1251', 'cp1252']:
             try:
@@ -139,36 +103,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
         
         if not content_str:
-            await update.message.reply_text("❌ Не удалось прочитать файл. Проверьте кодировку.")
+            await update.message.reply_text("❌ Не удалось прочитать файл.")
             return
         
-        # Парсим фильмы
         films = parse_kinopoisk_html_content(content_str)
         
         if not films:
-            await update.message.reply_text(
-                "❌ Не удалось найти фильмы в файле.\n\n"
-                "Убедись, что ты сохранил страницу с оценками:\n"
-                "https://www.kinopoisk.ru/user/ТВОЙ_ID/votes/"
-            )
+            await update.message.reply_text("❌ Не удалось найти фильмы в файле.")
             return
         
-        # Генерируем CSV
         csv_content = films_to_csv(films)
         csv_file = io.BytesIO(csv_content)
         csv_file.name = 'letterboxd_import.csv'
         
-        success_text = f"""✅ Успешно обработано {len(films)} фильмов!
-
-📁 CSV файл готов для импорта в Letterboxd.
-
-🔗 Следующие шаги:
-1. Сохрани полученный CSV файл
-2. Перейди на https://letterboxd.com/import  
-3. Загрузи этот файл
-4. Letterboxd автоматически добавит фильмы в твой профиль
-
-🎉 Готово! Теперь твоя коллекция фильмов будет и в Letterboxd!"""
+        success_text = f"✅ Успешно обработано {len(films)} фильмов!\n\nПерейди на https://letterboxd.com/import и загрузи этот файл."
         
         await update.message.reply_document(
             document=csv_file,
@@ -177,41 +125,60 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
     except Exception as e:
-        logger.error(f"Ошибка при обработке файла: {e}")
-        await update.message.reply_text(
-            "❌ Произошла ошибка при обработке файла. Попробуй еще раз или обратись к разработчику."
-        )
+        logger.error(f"Ошибка: {e}")
+        await update.message.reply_text("❌ Ошибка при обработке файла.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик обычных текстовых сообщений"""
     await update.message.reply_text(
         "📁 Отправь мне HTML файл страницы с оценками из Кинопоиска.\n\n"
-        "Нужна помощь? Напиши /help"
+        "Нужна помощь? Напиши /start"
     )
 
+# Web сервер для Render
+async def health_check(request):
+    return web.Response(text="Bot is running!")
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    port = int(os.environ.get('PORT', 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"Web server started on port {port}")
+
 def main():
-    """Главная функция запуска бота"""
-    # Получаем токен из переменных окружения
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     
     if not token:
-        print("❌ Ошибка: переменная окружения TELEGRAM_BOT_TOKEN не установлена")
-        print("Установи её командой: export TELEGRAM_BOT_TOKEN='твой_токен'")
+        print("❌ TELEGRAM_BOT_TOKEN не установлен")
         return
     
     # Создаем приложение
-    application = ApplicationBuilder().token(token).build()
+    application = Application.builder().token(token).build()
     
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 Бот запущен и готов к работе!")
+    # Запускаем бота в отдельном потоке
+    def run_bot():
+        print("🚀 Бот запущен!")
+        application.run_polling(drop_pending_updates=True)
     
-    # Запускаем бота
-    application.run_polling(allowed_updates=['message'])
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    # Запускаем веб-сервер в основном потоке
+    asyncio.run(run_web_server())
+    
+    # Ждем завершения потока с ботом
+    bot_thread.join()
 
 if __name__ == '__main__':
     main()

@@ -216,32 +216,59 @@ def run_web_server():
 
 def main():
     """Главная функция запуска бота"""
+    print("🔍 Запуск приложения...")
+    
     # Получаем токен из переменных окружения
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     
     if not token:
-        print("❌ Ошибка: переменная окружения TELEGRAM_BOT_TOKEN не установлена")
-        print("Установи её на сервере Render в настройках Environment Variables")
+        print("❌ Ошибка: TELEGRAM_BOT_TOKEN не установлен")
         return
     
-    # Запускаем веб-сервер в отдельном потоке для Render
-    web_thread = threading.Thread(target=run_web_server)
-    web_thread.daemon = True
-    web_thread.start()
+    print(f"✅ Токен найден: {token[:10]}...{token[-10:]}")
     
-    # Создаем приложение бота
-    application = Application.builder().token(token).build()
-    
-    # Добавляем обработчики команд
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    print("🚀 Telegram бот запущен и готов к работе!")
-    print("Доступные команды:")
-    print("  /start - приветствие и основная инструкция")
-    print("  /help - подробная инструкция")
-    
-    # Запускаем бота
-    application.run_polling(drop_pending_updates=True)
+    try:
+        # Запускаем веб-сервер в отдельном потоке для Render
+        print("🌐 Запуск веб-сервера...")
+        web_thread = threading.Thread(target=run_web_server)
+        web_thread.daemon = True
+        web_thread.start()
+        print("✅ Веб-сервер запущен")
+        
+        # Создаем приложение бота
+        print("🤖 Создание приложения бота...")
+        application = Application.builder().token(token).build()
+        print("✅ Приложение создано")
+        
+        # Добавляем обработчики команд
+        print("📋 Добавление обработчиков...")
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        print("✅ Обработчики добавлены")
+        
+        print("🚀 Telegram бот запущен и готов к работе!")
+        print("Доступные команды:")
+        print("  /start - приветствие и основная инструкция")
+        print("  /help - подробная инструкция")
+        
+        # Запускаем бота
+        print("🔄 Запуск polling...")
+        application.run_polling(drop_pending_updates=True)
+        
+    except Exception as e:
+        print(f"❌ Критическая ошибка: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("👋 Бот остановлен")
+    except Exception as e:
+        print(f"💥 Фатальная ошибка: {e}")
+        import traceback
+        traceback.print_exc()
